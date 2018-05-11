@@ -17,51 +17,32 @@
 #include <string.h>
 #include "pgm_image.h"
 // ADD YOUR EXTRA LIBRARIES HERE
-#include <pthread.h>
+#include <omp.h>
 
 #define STRING_SIZE 50
-#define NUM_THREADS 5
 
-// struct for args to threads
-typedef struct arg_struct{
-    int height;
-    int iterations;
-    int * t_id;
-}arg_t;
-
-// GLOBAL VARIABLES
+// GLOBAL VARIABLES //
 pgm_t * pointer;
 pgm_t * nextptr;
+pgm_t * temp;
+int number_threads = 4;
 
 ///// Function declarations /////
 void usage(const char * program);
-void lifeSimulation(pgm_t * pointer, pgm_t * nextptr, int start, int finish);
+void lifeSimulation(int iterations, char * start_file);
 void preparePGMImage(const void * board, pgm_t * board_image);
 void saveAsPGM(const void * board, pgm_t * board_image, int iteration);
 // ADD YOUR FUNCTION DECLARATIONS HERE
 void readFile(char * start_file, pgm_t * board_image);
-void * threadStart(void * arg);
-int adjacent_to (pgm_t * pointer, int i, int j) ;
+int adjacent_to (pgm_t * pointer, int i, int j);
+void game (pgm_t * pointer, pgm_t * nextptr, int start, int finish);
 
 int main(int argc, char * argv[])
 {
     char * start_file = "Boards/sample_4.txt";
     int iterations = 5;
-    int thread_status;
-    long i;
-    arg_t args;
-    int * t_ids;
-
-    pthread_t tid[NUM_THREADS];
-
-    t_ids = malloc(NUM_THREADS * sizeof(int));
-	if(t_ids==NULL)
-	{
-		printf("Problem in memory allocation of ids array!\n");
-		printf("Program exited.\n");
-		return -1;
-	}
-
+	unsigned int start;
+    unsigned int finish;
     printf("\n=== GAME OF LIFE ===\n");
     printf("{By: Aaron Zajac}\n");
 
@@ -74,6 +55,12 @@ int main(int argc, char * argv[])
     {
         iterations = atoi(argv[1]);
         start_file = argv[2];
+    }
+    else if (argc == 4)
+    {
+        iterations = atoi(argv[1]);
+        start_file = argv[2];
+        number_threads = atoi(argv[3]);
     }
     else if (argc != 1)
     {
@@ -88,41 +75,7 @@ int main(int argc, char * argv[])
     readFile(start_file, pointer);
     copyPGM(pointer, nextptr);
     printf("\n%d - %d\n", pointer->image.width, pointer->image.height);
-
-    args.height = pointer->image.height;
-    args.iterations = iterations;
-    args.t_id = t_ids;
-
-    // ------------- CREATE THREADS------------- //
-    for(i=0; i<NUM_THREADS; i++)
-    {
-        thread_status = pthread_create(&tid[i], NULL, &threadStart, (void *)&args);
-        // Check for errors
-        if (thread_status)
-        {
-            fprintf(stderr, "ERROR: pthread_create %d\n", thread_status);
-            exit(EXIT_FAILURE);
-        }
-
-        printf("Created thread %ld with ID %lu\n", i, tid[i]);
-    }
-    // Finish the threads
-    for(i=0; i<NUM_THREADS; i++)
-    {
-        //pthread_join(tid, &result);
-        //printf("Thread %d finished with return value: %d\n", i, *(int *)result);
-        pthread_join(tid[i], NULL);
-        printf("Thread %ld finished\n", i);
-    }
-
-    printf("All threads have finished\n");
-
-    // Call this function to wait for the other threads to finish
-    pthread_exit(NULL);
-
-    //free memory
-    freeImage(pointer);
-    freeImage(nextptr);
+    lifeSimulation(iterations, start, finish);
 
     return 0;
 }
@@ -131,23 +84,44 @@ int main(int argc, char * argv[])
 void usage(const char * program)
 {
     printf("Usage:\n");
-    printf("%s [iterations] [board file]\n", program);
+    printf("%s [iterations] [board file] [number of threads]\n", program);
 }
 
 // Main loop for the simulation
-void lifeSimulation(pgm_t * pointer, pgm_t * nextptr, int start, int finish)
-{   
-    int i, j, alive;
+void lifeSimulation(int iterations, int start, int finish);
+{
+    int tid;
+    int i;
+    #pragma omp parallel shared(pointer, nextptr, temp, number_threads, iterations) private(tid, i, start, finish) num_threads(number_threads)
+    {
+        //Get thread number ID
+        tid = omp_get_thread_num();
+        //Specify the bounds
+		start = tid * (pointer->image.height / number_threads);
+		finish = start + (pointer->image.height / number_threads);
+		
+		// Exclude extern cells
+		if(tid==0) start++;
+		if(tid==number_threads-1) finish=pointer->image.height-1;
 
-	// Exclude board region and apply for each cell the game's rules
-	for (i=1; i<pointer->image.width-1; i++) for (j=start; j<finish; j++) 
-	{
-		alive = adjacent_to (pointer, i, j);
-		if (alive == 2) nextptr->image.pixels[i][j].value = pointer->image.pixels[i][j].value;
-		if (alive == 3) nextptr->image.pixels[i][j].value = 1;
-		if (alive < 2) nextptr->image.pixels[i][j].value = 0;
-		if (alive > 3) nextptr->image.pixels[i][j].value = 0;
-	}
+        // Play the game
+        for(i = 0; i<iter; i++){
+            //each thread will play with each bound
+            game(pointer, nextptr, start, finish);
+            #pragma omp barrier
+            //the thread with the id = 0 is the one to swap the pointers
+            if(i == 0)
+            {
+                printf("Done!\n");
+                //swap pointers
+                temp = pointer;
+                pointer = nextptr;
+                nextptr = temp;
+            }
+            #pragma omp barrier
+        }
+    }
+    return 0;
 }
 
 // Get the memory necessary to store an image
@@ -162,6 +136,7 @@ void saveAsPGM(const void * board, pgm_t * board_image, int iteration)
 
 }
 
+// Read the txt
 void readFile(char * filename, pgm_t * board_image){
     FILE* file_ptr = NULL;
 
@@ -179,29 +154,7 @@ void readFile(char * filename, pgm_t * board_image){
     }
 }
 
-void * threadStart(void * arg){
-    arg_t *args = arg;
-    int * thread_id = args->t_id;
-    int height = args->height;
-    int iter = args->iterations;
-
-    int bound = height / NUM_THREADS;
-    int start = *thread_id * bound;
-	int finish = start + bound;
-
-    int i;
-
-	// exclude extern cells
-	if(*thread_id==0) start++;
-	if(*thread_id==NUM_THREADS-1) finish=height-1;
-
-    for(i = 0; i<iter; i++){
-        lifeSimulation(pointer, nextptr, start, finish);
-    }
-    pthread_exit(NULL);
-    return NULL;
-}
-
+// To know the neighbors from each cell
 int adjacent_to (pgm_t * pointer, int i, int j) 
 {
 	int row, col, count;
@@ -223,4 +176,19 @@ int adjacent_to (pgm_t * pointer, int i, int j)
 			}
 		}		
 	return count;
+}
+
+void game (pgm_t * pointer, pgm_t * nextptr, int start, int finish)
+{
+	int i, j, alive;
+
+	// Exclude board region and apply for each cell the game's rules
+	for (i=1; i<pointer->image.width-1; i++) for (j=start; j<finish; j++) 
+	{
+		alive = adjacent_to (pointer, i, j);
+		if (alive == 2) nextptr[i][j] = pointer[i][j];
+		if (alive == 3) nextptr[i][j] = 1;
+		if (alive < 2) nextptr[i][j] = 0;
+		if (alive > 3) nextptr[i][j] = 0;
+	}
 }
